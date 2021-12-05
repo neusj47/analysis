@@ -3,26 +3,71 @@ import requests
 import FinanceDataReader as fdr
 from pandas.io.json import json_normalize
 import json
-import datetime
-import matplotlib.pyplot as plt
+from datetime import datetime, timedelta
+from dateutil.relativedelta import relativedelta
+from pykrx import stock
+
 
 start_date = '20201030'
 end_date ='20211130'
-
-df_krx = fdr.StockListing('KRX')
-
 tgt_n = 5
 lookback_m = 1
 
+# ETF 코드 가져오기
 url = 'https://finance.naver.com/api/sise/etfItemList.nhn'
 json_data = json.loads(requests.get(url).text)
 df = json_normalize(json_data['result']['etfItemList'])[['itemcode','itemname','nav','marketSum']]
-
+# df_krx = fdr.StockListing('KRX')
 bm = pd.DataFrame(fdr.DataReader('148020', start_date, end_date)['Close'])
 
+
+# ETF 정보 가져오기 (상세)
+etf_info = pd.read_excel('C:/Users/ysj/Desktop/etf_info.xlsx')
+
+
+# ETF 일별 시가총액 가져오기 (엔진변경)
+def get_etf_siga(stddate, etf_info):
+    siga = pd.DataFrame()
+    for i in range(0,len(etf_info.종목코드)) :
+        etf_info.종목코드.iloc[i] = str(etf_info.종목코드[i]).zfill(6)
+        siga_temp = stock.get_etf_ohlcv_by_date(stddate,stddate,etf_info.종목코드[i])
+        siga_temp['종목코드'] = etf_info.종목코드[i]
+        siga = pd.concat([siga, siga_temp])
+    siga = pd.merge(etf_info, siga, how='inner', on='종목코드')
+    return siga
+siga = get_etf_siga(end_date, etf_info)
+siga.to_excel(excel_writer = 'C:/Users/ysj/Desktop/siga.xlsx')
+
+
+# ETF 기간 수익률 가져오기
+def get_etf_rtn(etf_info, stddate) :
+    date = [stddate
+        , stock.get_nearest_business_day_in_a_week(datetime.strftime(datetime.strptime(stddate, "%Y%m%d") - timedelta(days=8),"%Y%m%d"))
+        , stock.get_nearest_business_day_in_a_week(datetime.strftime(datetime.strptime(stddate, "%Y%m%d") - relativedelta(months=1),"%Y%m%d"))
+        , stock.get_nearest_business_day_in_a_week(datetime.strftime(datetime.strptime(stddate, "%Y%m%d") - relativedelta(months=3),"%Y%m%d"))
+        , stock.get_nearest_business_day_in_a_week(datetime.strftime(datetime.strptime(stddate, "%Y%m%d") - relativedelta(years=1),"%Y%m%d"))]
+    etf_rtn = pd.DataFrame()
+    for n in range(0, len(etf_info.종목코드)):
+#         etf_info.종목코드.iloc[n] = str(etf_info.종목코드[n]).zfill(6)
+        df = pd.DataFrame()
+        for i in range(0,len(date)) :
+            df_temp = stock.get_etf_ohlcv_by_date(date[i],date[i],etf_info.종목코드.iloc[n])
+            df = pd.concat([df,df_temp])
+        df['종목코드'] = etf_info.종목코드.iloc[n]
+        df['1W'] = df.종가 / df.shift(-1).종가 - 1
+        df['1M'] = df.종가 / df.shift(-2).종가 - 1
+        df['3M'] = df.종가 / df.shift(-3).종가 - 1
+        df['1Y'] = df.종가 / df.shift(-4).종가 - 1
+        etf_rtn = pd.concat([etf_rtn,df[['종목코드', '종가','NAV','1W','1M','3M','1Y']].iloc[0:1]]).fillna(0)
+    etf_rtn = pd.merge(etf_rtn, etf_info[['종목코드','ETF약명','기초시장','기초자산','기초자산상세']], how = 'inner', on ='종목코드').sort_values(by= '1W', ascending = False)
+    etf_rtn = etf_rtn[['기초시장','기초자산','기초자산상세','종목코드','ETF약명','종가','NAV','1W','1M','3M','1Y']]
+    return etf_rtn
+rtn = get_etf_rtn(etf_info, end_date)
+rtn.to_excel(excel_writer = 'C:/Users/ysj/Desktop/rtn.xlsx')
+
+
+# ETF Top5 수익률 정렬
 target_list = ['400580','300640','401170','381170','368590','387270','390390','354350','394670','371460','394660','385600','305540','387280']
-
-
 def get_top_pick(start_date, end_date, df, tgt_n) :
     etf = pd.DataFrame()
     for i in range(0, len(target_list)):
@@ -57,63 +102,3 @@ def get_top_pick(start_date, end_date, df, tgt_n) :
     return df_all, df_etf_t, df_rtn_t
 
 df_all, df_etf_t, df_rtn_t =  get_top_pick(start_date, end_date, df, tgt_n)
-
-
-df_pf = df[df.itemcode.isin(target_list)]
-
-def get_data(df_pf, target_list, start_date, end_date) :
-    prc = pd.DataFrame()
-    for i in range(0, len(df_pf)):
-        prc_temp = pd.DataFrame(fdr.DataReader(target_list[i], start_date, end_date)['Close'])
-        prc_temp.columns = df_pf[df_pf.itemcode == target_list[i]].itemname
-        prc = pd.concat([prc, prc_temp], axis=1)
-    return prc
-
-df = get_data(df_pf, target_list, start_date, end_date)
-
-def get_signal(df, lookback_m, tgt_n) :
-    month_list = df.index.map(lambda x: datetime.datetime.strftime(x, '%Y-%m')).unique()
-    rebal_date = pd.DataFrame()
-    for m in month_list:
-        try:
-            rebal_date = rebal_date.append(
-                df[df.index.map(lambda x: datetime.datetime.strftime(x, '%Y-%m')) == m].iloc[-1])
-        except Exception as e:
-            print("Error : ", str(e))
-        pass
-    rebal_date = rebal_date[sorted(df.columns)]
-    rebal_date = rebal_date / rebal_date.shift(1)
-    recent_returns = df.pct_change(lookback_m * 20)
-    rebal_date.iloc[len(rebal_date) - 1] = recent_returns.iloc[len(recent_returns) - 1][sorted(recent_returns.columns)]
-    signal = (rebal_date.rank(axis=1, ascending=False) <= tgt_n).applymap(lambda x: '1' if x else '0')
-    signal = pd.DataFrame(signal)
-    signal = signal.shift(1).fillna(0)
-    signal = signal.astype(float)
-    return signal
-
-signal = get_signal(df, lookback_m, tgt_n)
-
-def get_return(df,signal,tgt_n) :
-    df = df.rename_axis('Date').reset_index()
-    df['Date'] = pd.to_datetime(df['Date'])
-    df['YYYY-MM'] = df['Date'].map(lambda x: datetime.datetime.strftime(x, '%Y-%m'))
-    signal['YYYY-MM'] = signal.index.map(lambda x: datetime.datetime.strftime(x, '%Y-%m'))
-    book = pd.merge(df[['Date', 'YYYY-MM']], signal, on='YYYY-MM', how='left')
-    book.set_index(['Date'], inplace=True)
-    signal = book[sorted(df_pf.itemname)].astype(float)
-    df.set_index(['Date'], inplace=True)
-    df = df[sorted(df_pf.itemname)]
-    df = df.pct_change().fillna(0)
-    result = pd.DataFrame(((signal * df) * 1 / tgt_n).sum(axis=1))
-    return result, signal
-
-rtn = get_return(df,signal,tgt_n)[0]
-
-
-plt.figure(figsize=(17,7))
-plt.title('theme rotation return')
-plt.ylabel('cumulative_return(100%p)')
-plt.plot((1 + rtn).cumprod() - 1, label = 'theme')
-plt.plot((1 + bm['Close'].pct_change().fillna(0)).cumprod() - 1, label = 'BenchMark')
-plt.legend()
-plt.show()
