@@ -1,6 +1,6 @@
 import matplotlib.pyplot as plt
+from etf import *
 
-from rank import *
 
 df_pf = df[df.itemcode.isin(target_list)]
 
